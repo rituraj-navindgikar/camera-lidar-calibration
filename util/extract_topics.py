@@ -8,7 +8,6 @@ import numpy as np
 import cv2
 from tqdm import tqdm
 
-
 class McapTimeWindowExtractor:
     def __init__(
         self,
@@ -136,7 +135,7 @@ class McapTimeWindowExtractor:
         })
 
     def _process_lidar(self, msg, timestamp_sec: float, timestamp_ns: int) -> None:
-        point_cloud = self._decode_pointcloud2_fast(msg)
+        point_cloud = self._decode_pointcloud2(msg)
         
         self.lidar_scans.append({
             "timestamp_sec": timestamp_sec,
@@ -187,46 +186,91 @@ class McapTimeWindowExtractor:
             raise ValueError(f"Unsupported encoding: {image_msg.encoding}")
 
     @staticmethod
-    def _decode_pointcloud2_fast(cloud_msg) -> np.ndarray:
-        point_dtype = np.dtype([("x", np.float32), ("y", np.float32), ("z", np.float32)])
-        structured_points = np.frombuffer(cloud_msg.data, dtype=point_dtype)
+    def _decode_pointcloud2(cloud_msg) -> np.ndarray:
+        """
+        Properly decode PointCloud2 by respecting point_step and field offsets
+        """
+        # Find X, Y, Z field offsets
+        field_map = {}
+        for field in cloud_msg.fields:
+            if field.name in ['x', 'y', 'z']:
+                field_map[field.name] = field.offset
         
-        x, y, z = structured_points["x"], structured_points["y"], structured_points["z"]
-        valid_mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+        if len(field_map) != 3:
+            raise ValueError(f"PointCloud2 missing XYZ fields. Found: {[f.name for f in cloud_msg.fields]}")
         
-        return np.stack([x[valid_mask], y[valid_mask], z[valid_mask]], axis=1)
+        # Get point step (bytes per point)
+        point_step = cloud_msg.point_step
+        num_points = cloud_msg.width * cloud_msg.height
+        
+        # Ensure we have enough data
+        expected_size = num_points * point_step
+        actual_size = len(cloud_msg.data)
+        
+        if actual_size < expected_size:
+            num_points = actual_size // point_step
+        
+        # Create output array
+        points = np.zeros((num_points, 3), dtype=np.float32)
+        
+        # Convert data to numpy array
+        data_array = np.frombuffer(cloud_msg.data, dtype=np.uint8)
+        
+        # Extract each coordinate at its proper offset
+        for i, coord_name in enumerate(['x', 'y', 'z']):
+            offset = field_map[coord_name]
+            
+            # Create indices for all points at this coordinate's offset
+            indices = np.arange(num_points) * point_step + offset
+            
+            # Extract float32 values
+            for pt_idx, byte_idx in enumerate(indices):
+                if byte_idx + 4 <= len(data_array):
+                    # Read 4 bytes as float32
+                    points[pt_idx, i] = np.frombuffer(
+                        data_array[byte_idx:byte_idx+4].tobytes(), 
+                        dtype=np.float32
+                    )[0]
+        
+        # Filter invalid points
+        valid_mask = np.all(np.isfinite(points), axis=1)
+        valid_points = points[valid_mask]
+        
+        # Remove exact zeros (common invalid marker)
+        non_zero_mask = ~np.all(valid_points == 0, axis=1)
+        
+        return valid_points[non_zero_mask]
 
-
-if __name__ == "__main__":
-    # Example 1: Extract 5 seconds starting from 10 seconds into the bag
-    # You would need to manually visualize what will be your data start 
-    extractor = McapTimeWindowExtractor(
-        mcap_path="dataset/bag2_forsyth_street_all.mcap",
-        camera_topic="/cam_sync/cam0/image_raw/compressed",
-        lidar_topic="/ouster/points",
-        imu_topic="/vectornav/imu_uncompensated",
-        start_time=10.0,    # Start at 10 seconds
-        duration=5.0        # Extract 5 seconds worth
-    )
+# if __name__ == "__main__":
+#     # Example 1: Extract 5 seconds starting from 10 seconds into the bag
+#     # You would need to manually visualize what will be your data start 
+#     extractor = McapTimeWindowExtractor(
+#         mcap_path="dataset/bag2_forsyth_street_all.mcap",
+#         camera_topic="/cam_sync/cam0/image_raw/compressed",
+#         lidar_topic="/ouster/points",
+#         imu_topic="/vectornav/imu_uncompensated",
+#         start_time=10.0,    # Start at 10 seconds
+#         duration=5.0        # Extract 5 seconds worth
+#     )
     
-    extractor.extract()
+#     extractor.extract()
     
-    if extractor.camera_frames:
-        print(f"\n[CAM]")
-        print(f"  First frame t: {extractor.camera_frames[0]['timestamp_sec']:.3f}s")
-        print(f"  Last frame t:  {extractor.camera_frames[-1]['timestamp_sec']:.3f}s")
-        print(f"  Image shape: {extractor.camera_frames[0]['image'].shape}")
-        print(f"  Total frames: {len(extractor.camera_frames)}")
+#     if extractor.camera_frames:
+#         print(f"\n[CAM]")
+#         print(f"  First frame t: {extractor.camera_frames[0]['timestamp_sec']:.3f}s")
+#         print(f"  Last frame t:  {extractor.camera_frames[-1]['timestamp_sec']:.3f}s")
+#         print(f"  Image shape: {extractor.camera_frames[0]['image'].shape}")
+#         print(f"  Total frames: {len(extractor.camera_frames)}")
     
-    if extractor.lidar_scans:
-        print(f"\n[LIDAR]")
-        print(f"  First scan t: {extractor.lidar_scans[0]['timestamp_sec']:.3f}s")
-        print(f"  Last scan t:  {extractor.lidar_scans[-1]['timestamp_sec']:.3f}s")
-        print(f"  Points shape: {extractor.lidar_scans[0]['points'].shape}")
-        print(f"  Total scans: {len(extractor.lidar_scans)}")
+#     if extractor.lidar_scans:
+#         print(f"\n[LIDAR]")
+#         print(f"  First scan t: {extractor.lidar_scans[0]['timestamp_sec']:.3f}s")
+#         print(f"  Last scan t:  {extractor.lidar_scans[-1]['timestamp_sec']:.3f}s")
+#         print(f"  Points shape: {extractor.lidar_scans[0]['points'].shape}")
+#         print(f"  Total scans: {len(extractor.lidar_scans)}")
     
-    if extractor.imu_measurements:
-        print(f"\n[IMU]")
-        print(f"  First meas t: {extractor.imu_measurements[0]['timestamp_sec']:.3f}s")
-        print(f"  Last meas t:  {extractor.imu_measurements[-1]['timestamp_sec']:.3f}s")
-        print(f"  Total measurements: {len(extractor.imu_measurements)}")
+#     if extractor.imu_measurements:
+#         print(f"\n[IMU]")
+#         print(f"  First meas t: {extractor.imu_measurements[0]['timestamp_sec']:.3f}s")
+#         print(f"  Last meas t:  {extractor.imu_measurements[-1]['timestamp_sec']:.3f}s")
+#         print(f"  Total measurements: {len(extractor.imu_measurements)}")
