@@ -1,6 +1,6 @@
 # Camera-LiDAR Temporal Calibration
 
-**By Group 1** - a joint project for camera-LiDAR sensor calibration on the Hunter robot.
+**By Group 1** - A joint project for camera-LiDAR sensor calibration on the Hunter robot.
 
 ## Overview
 
